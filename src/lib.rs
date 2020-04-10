@@ -6,6 +6,9 @@ extern crate bitflags;
 
 pub mod client;
 pub mod codec3;
+pub mod codec5;
+#[macro_use]
+mod topic;
 mod connect;
 mod default;
 mod dispatcher;

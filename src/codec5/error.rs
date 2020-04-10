@@ -21,9 +21,7 @@ impl PartialEq for ParseError {
         match (self, other) {
             (ParseError::InvalidProtocol, ParseError::InvalidProtocol) => true,
             (ParseError::InvalidLength, ParseError::InvalidLength) => true,
-            (ParseError::UnsupportedProtocolLevel, ParseError::UnsupportedProtocolLevel) => {
-                true
-            }
+            (ParseError::UnsupportedProtocolLevel, ParseError::UnsupportedProtocolLevel) => true,
             (ParseError::ConnectReservedFlagSet, ParseError::ConnectReservedFlagSet) => true,
             (ParseError::ConnAckReservedFlagSet, ParseError::ConnAckReservedFlagSet) => true,
             (ParseError::InvalidClientId, ParseError::InvalidClientId) => true,
@@ -48,4 +46,17 @@ impl From<str::Utf8Error> for ParseError {
     fn from(err: str::Utf8Error) -> Self {
         ParseError::Utf8Error(err)
     }
+}
+
+macro_rules! ensure {
+    ($cond:expr, $e:expr) => {
+        if !($cond) {
+            return Err($e);
+        }
+    };
+    ($cond:expr, $fmt:expr, $($arg:tt)+) => {
+        if !($cond) {
+            return Err($fmt, $($arg)+);
+        }
+    };
 }
