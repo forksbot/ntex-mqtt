@@ -1,7 +1,7 @@
+use super::error::{ParseError, EncodeError};
 use super::parse::{decode_variable_length, read_packet};
-use super::{encode::EncodeLtd, MAX_PACKET_SIZE};
-use super::error::ParseError;
 use super::Packet;
+use super::{encode::EncodeLtd, MAX_PACKET_SIZE};
 use bytes::{Buf, BytesMut};
 use ntex_codec::{Decoder, Encoder};
 
@@ -98,13 +98,13 @@ impl Decoder for Codec {
 
 impl Encoder for Codec {
     type Item = Packet;
-    type Error = ParseError;
+    type Error = EncodeError;
 
-    fn encode(&mut self, item: Self::Item, dst: &mut BytesMut) -> Result<(), ParseError> {
+    fn encode(&mut self, item: Self::Item, dst: &mut BytesMut) -> Result<(), EncodeError> {
         let max_size = self.max_packet_size.map_or(MAX_PACKET_SIZE, |v| v - 5); // fixed header = 1, var_len(remaining.max_value()) = 4
         let content_size = item.encoded_size(max_size);
         if content_size > max_size as usize {
-            return Err(ParseError::InvalidLength); // todo: separate error code
+            return Err(EncodeError::InvalidLength); // todo: separate error code
         }
         dst.reserve(content_size + 5);
         item.encode(dst, content_size as u32)?; // safe: max_size <= u32 max value

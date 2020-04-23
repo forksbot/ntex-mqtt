@@ -1,22 +1,21 @@
-use crate::codec5::error::ParseError;
+use super::{ByteStr, UserProperties};
+use crate::codec5::error::EncodeError;
 use crate::codec5::packet::property_type as pt;
 use crate::codec5::packet::*;
 use bytes::{BufMut, Bytes, BytesMut};
 use std::num::{NonZeroU16, NonZeroU32};
-use super::{UserProperties, ByteStr};
 
 pub(crate) trait EncodeLtd {
     fn encoded_size(&self, limit: u32) -> usize;
-    fn encode(&self, buf: &mut BytesMut, size: u32) -> Result<(), ParseError>;
+    fn encode(&self, buf: &mut BytesMut, size: u32) -> Result<(), EncodeError>;
 }
 
 pub(crate) trait Encode {
     fn encoded_size(&self) -> usize;
 
     #[must_use]
-    fn encode(&self, buf: &mut BytesMut) -> Result<(), ParseError>;
+    fn encode(&self, buf: &mut BytesMut) -> Result<(), EncodeError>;
 }
-
 
 impl EncodeLtd for Packet {
     fn encoded_size(&self, limit: u32) -> usize {
@@ -39,7 +38,7 @@ impl EncodeLtd for Packet {
         }
     }
 
-    fn encode(&self, buf: &mut BytesMut, check_size: u32) -> Result<(), ParseError> {
+    fn encode(&self, buf: &mut BytesMut, check_size: u32) -> Result<(), EncodeError> {
         match self {
             Packet::Connect(connect) => {
                 buf.put_u8(0b0001_0000);
@@ -123,71 +122,6 @@ impl EncodeLtd for Packet {
     }
 }
 
-impl EncodeLtd for Disconnect {
-    fn encoded_size(&self, limit: u32) -> usize {
-        const HEADER_LEN: usize = 1; // reason code
-
-        let mut prop_len = encoded_property_size(&self.session_expiry_interval_secs)
-            + encoded_property_size(&self.server_reference);
-        let diag_len = encoded_size_opt_props(
-            &self.user_properties,
-            &self.reason_string,
-            reduce_limit(limit, prop_len + HEADER_LEN + 4),
-        ); // exclude other props and max of 4 bytes for property length value
-        prop_len += diag_len;
-        HEADER_LEN + var_int_len(prop_len) as usize + prop_len
-    }
-
-    fn encode(&self, buf: &mut BytesMut, size: u32) -> Result<(), ParseError> {
-        let start_len = buf.len();
-        buf.put_u8(self.reason_code.into());
-
-        let prop_len = var_int_len_from_size(size - 1);
-        write_variable_length(prop_len, buf);
-        encode_property(&self.session_expiry_interval_secs, pt::SESS_EXPIRY_INT, buf)?;
-        encode_property(&self.server_reference, pt::SERVER_REF, buf)?;
-        println!("size: {}, buf len: {}", size, buf.len());
-        encode_opt_props(
-            &self.user_properties,
-            &self.reason_string,
-            buf,
-            size - (buf.len() - start_len) as u32,
-        )
-    }
-}
-
-impl EncodeLtd for Auth {
-    fn encoded_size(&self, limit: u32) -> usize {
-        const HEADER_LEN: usize = 1; // reason code
-
-        let mut prop_len =
-            encoded_property_size(&self.auth_method) + encoded_property_size(&self.auth_data);
-        let diag_len = encoded_size_opt_props(
-            &self.user_properties,
-            &self.reason_string,
-            reduce_limit(limit, prop_len + HEADER_LEN + 4),
-        ); // exclude other props and max of 4 bytes for property length value
-        prop_len += diag_len;
-        HEADER_LEN + var_int_len(prop_len) as usize + prop_len
-    }
-
-    fn encode(&self, buf: &mut BytesMut, size: u32) -> Result<(), ParseError> {
-        let start_len = buf.len();
-        buf.put_u8(self.reason_code.into());
-
-        let prop_len = var_int_len_from_size(size - 1);
-        write_variable_length(prop_len, buf);
-        encode_property(&self.auth_method, pt::AUTH_METHOD, buf)?;
-        encode_property(&self.auth_data, pt::AUTH_DATA, buf)?;
-        encode_opt_props(
-            &self.user_properties,
-            &self.reason_string,
-            buf,
-            size - (buf.len() - start_len) as u32,
-        )
-    }
-}
-
 pub(crate) fn encoded_size_opt_props(
     user_props: &UserProperties,
     reason_str: &Option<ByteStr>,
@@ -218,7 +152,7 @@ pub(crate) fn encode_opt_props(
     reason_str: &Option<ByteStr>,
     buf: &mut BytesMut,
     mut size: u32,
-) -> Result<(), ParseError> {
+) -> Result<(), EncodeError> {
     for up in user_props.iter() {
         let prop_len = 1 + up.0.encoded_size() + up.1.encoded_size(); // prop_type.len() + key.len() + val.len()
         if prop_len > size as usize {
@@ -241,15 +175,17 @@ pub(crate) fn encode_opt_props(
     Ok(())
 }
 
+#[inline]
 pub(crate) fn encoded_property_size<T: Encode>(v: &Option<T>) -> usize {
     v.as_ref().map_or(0, |v| 1 + v.encoded_size()) // 1 - property type byte
 }
 
+#[inline]
 pub(crate) fn encode_property<T: Encode>(
     v: &Option<T>,
     prop_type: u8,
     buf: &mut BytesMut,
-) -> Result<(), ParseError> {
+) -> Result<(), EncodeError> {
     if let Some(v) = v {
         buf.put_u8(prop_type);
         v.encode(buf)
@@ -327,7 +263,7 @@ impl<T: Encode> Encode for Option<T> {
             0
         }
     }
-    fn encode(&self, buf: &mut BytesMut) -> Result<(), ParseError> {
+    fn encode(&self, buf: &mut BytesMut) -> Result<(), EncodeError> {
         if let Some(v) = self {
             v.encode(buf)
         } else {
@@ -340,7 +276,7 @@ impl Encode for bool {
     fn encoded_size(&self) -> usize {
         1
     }
-    fn encode(&self, buf: &mut BytesMut) -> Result<(), ParseError> {
+    fn encode(&self, buf: &mut BytesMut) -> Result<(), EncodeError> {
         if *self {
             buf.put_u8(0x1);
         } else {
@@ -354,7 +290,7 @@ impl Encode for u16 {
     fn encoded_size(&self) -> usize {
         2
     }
-    fn encode(&self, buf: &mut BytesMut) -> Result<(), ParseError> {
+    fn encode(&self, buf: &mut BytesMut) -> Result<(), EncodeError> {
         buf.put_u16(*self);
         Ok(())
     }
@@ -364,7 +300,7 @@ impl Encode for NonZeroU16 {
     fn encoded_size(&self) -> usize {
         2
     }
-    fn encode(&self, buf: &mut BytesMut) -> Result<(), ParseError> {
+    fn encode(&self, buf: &mut BytesMut) -> Result<(), EncodeError> {
         self.get().encode(buf)
     }
 }
@@ -373,7 +309,7 @@ impl Encode for u32 {
     fn encoded_size(&self) -> usize {
         4
     }
-    fn encode(&self, buf: &mut BytesMut) -> Result<(), ParseError> {
+    fn encode(&self, buf: &mut BytesMut) -> Result<(), EncodeError> {
         buf.put_u32(*self);
         Ok(())
     }
@@ -383,7 +319,7 @@ impl Encode for NonZeroU32 {
     fn encoded_size(&self) -> usize {
         4
     }
-    fn encode(&self, buf: &mut BytesMut) -> Result<(), ParseError> {
+    fn encode(&self, buf: &mut BytesMut) -> Result<(), EncodeError> {
         self.get().encode(buf)
     }
 }
@@ -392,7 +328,7 @@ impl Encode for Bytes {
     fn encoded_size(&self) -> usize {
         2 + self.len()
     }
-    fn encode(&self, buf: &mut BytesMut) -> Result<(), ParseError> {
+    fn encode(&self, buf: &mut BytesMut) -> Result<(), EncodeError> {
         buf.put_u16(self.len() as u16);
         buf.extend_from_slice(self.as_ref());
         Ok(())
@@ -403,7 +339,7 @@ impl Encode for ByteStr {
     fn encoded_size(&self) -> usize {
         self.get_ref().encoded_size()
     }
-    fn encode(&self, buf: &mut BytesMut) -> Result<(), ParseError> {
+    fn encode(&self, buf: &mut BytesMut) -> Result<(), EncodeError> {
         self.get_ref().encode(buf)
     }
 }
@@ -412,7 +348,7 @@ impl Encode for (ByteStr, ByteStr) {
     fn encoded_size(&self) -> usize {
         self.0.encoded_size() + self.1.encoded_size()
     }
-    fn encode(&self, buf: &mut BytesMut) -> Result<(), ParseError> {
+    fn encode(&self, buf: &mut BytesMut) -> Result<(), EncodeError> {
         self.0.encode(buf)?;
         self.1.encode(buf)
     }
@@ -426,7 +362,7 @@ impl Encode for UserProperties {
         }
         len
     }
-    fn encode(&self, buf: &mut BytesMut) -> Result<(), ParseError> {
+    fn encode(&self, buf: &mut BytesMut) -> Result<(), EncodeError> {
         for prop in self {
             buf.put_u8(pt::USER);
             prop.encode(buf)?;
@@ -448,8 +384,8 @@ mod tests {
     use bytestring::ByteString;
 
     use super::*;
-    use crate::codec5::MAX_PACKET_SIZE;
     use crate::codec5::proto::*;
+    use crate::codec5::MAX_PACKET_SIZE;
 
     fn packet_id(v: u16) -> NonZeroU16 {
         NonZeroU16::new(v).unwrap()
@@ -507,13 +443,15 @@ mod tests {
         });
 
         assert_eq!(p.encoded_size(MAX_PACKET_SIZE), 265);
-        p.encode(&mut v, 265);
+        p.encode(&mut v, 265).unwrap();
         assert_eq!(&v[..3], b"\x3d\x89\x02".as_ref());
     }
 
     fn assert_encode_packet(packet: &Packet, expected: &[u8]) {
         let mut v = BytesMut::with_capacity(1024);
-        packet.encode(&mut v, packet.encoded_size(1024) as u32);
+        packet
+            .encode(&mut v, packet.encoded_size(1024) as u32)
+            .unwrap();
         assert_eq!(expected.len(), v.len());
         assert_eq!(&expected[..], &v[..]);
     }
@@ -653,7 +591,8 @@ mod tests {
         assert_encode_packet(
             &Packet::SubscribeAck(SubscribeAck {
                 packet_id: packet_id(0x1234),
-                properties: AckProperties::default(),
+                properties: UserProperties::default(),
+                reason_string: None,
                 status: vec![
                     SubscribeAckReasonCode::GrantedQos1,
                     SubscribeAckReasonCode::UnspecifiedError,
@@ -678,7 +617,8 @@ mod tests {
         assert_encode_packet(
             &Packet::UnsubscribeAck(UnsubscribeAck {
                 packet_id: packet_id(0x4321),
-                properties: AckProperties::default(),
+                properties: UserProperties::default(),
+                reason_string: None,
                 status: vec![
                     UnsubscribeAckReasonCode::Success,
                     UnsubscribeAckReasonCode::NotAuthorized,

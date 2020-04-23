@@ -1,12 +1,5 @@
 use crate::codec5::{
-    encode::{
-        encode_property, encoded_property_size, var_int_len, var_int_len_from_size,
-        write_variable_length, Encode, EncodeLtd,
-    },
-    parse::{take_properties, Parse, Property, decode_variable_length_cursor},
-    property_type as pt,
-    proto::QoS,
-    ByteStr, ParseError, UserProperties,
+    encode::*, parse::*, property_type as pt, proto::QoS, ByteStr, EncodeError, ParseError, UserProperties,
 };
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use std::{
@@ -134,16 +127,16 @@ impl EncodeLtd for Publish {
             + self.payload.len()
     }
 
-    fn encode(&self, buf: &mut BytesMut, size: u32) -> Result<(), ParseError> {
+    fn encode(&self, buf: &mut BytesMut, size: u32) -> Result<(), EncodeError> {
         let start_len = buf.len();
         self.topic.encode(buf)?;
         if self.qos == QoS::AtMostOnce {
             if self.packet_id.is_some() {
-                return Err(ParseError::MalformedPacket); // packet id must not be set
+                return Err(EncodeError::MalformedPacket); // packet id must not be set
             }
         } else {
             self.packet_id
-                .ok_or(ParseError::PacketIdRequired)?
+                .ok_or(EncodeError::PacketIdRequired)?
                 .encode(buf)?;
         }
         self.properties.encode(
@@ -172,7 +165,7 @@ impl EncodeLtd for PublishProperties {
         prop_len + var_int_len(prop_len) as usize
     }
 
-    fn encode(&self, buf: &mut BytesMut, size: u32) -> Result<(), ParseError> {
+    fn encode(&self, buf: &mut BytesMut, size: u32) -> Result<(), EncodeError> {
         let prop_len = var_int_len_from_size(size);
         write_variable_length(prop_len, buf);
         encode_property(&self.topic_alias, pt::TOPIC_ALIAS, buf)?;

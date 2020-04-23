@@ -1,12 +1,15 @@
 use crate::codec5::{
-    ByteStr, UserProperty, UserProperties,
+    encode::*,
+    parse::*,
     property_type as pt,
-    encode::{EncodeLtd, encode_property, encoded_property_size, var_int_len, write_variable_length, Encode},
     proto::{Protocol, QoS, DEFAULT_MQTT_LEVEL},
-    ParseError, parse::{Parse, take_properties, Property},
+    ByteStr, EncodeError, ParseError, UserProperties, UserProperty,
 };
-use bytes::{Bytes, BytesMut, Buf, BufMut};
-use std::{convert::TryFrom, num::{NonZeroU16, NonZeroU32}};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
+use std::{
+    convert::TryFrom,
+    num::{NonZeroU16, NonZeroU32},
+};
 
 const WILL_QOS_SHIFT: u8 = 3;
 
@@ -20,57 +23,6 @@ bitflags! {
         const CLEAN_START = 0b0000_0010;
     }
 }
-
-// #[derive(Debug, PartialEq, Clone)]
-// /// Connection Will
-// pub struct LastWill {
-//     /// the QoS level to be used when publishing the Will Message.
-//     pub qos: QoS,
-//     /// the Will Message is to be Retained when it is published.
-//     pub retain: bool,
-//     /// the Will Topic
-//     pub topic: ByteStr,
-//     /// defines the Application Message that is to be published to the Will Topic
-//     pub message: Bytes,
-
-//     pub will_delay_interval_sec: Option<u32>,
-//     pub correlation_data: Option<Bytes>,
-//     pub message_expiry_interval: Option<NonZeroU32>,
-//     pub content_type: Option<ByteStr>,
-//     pub user_properties: UserProperties,
-//     pub is_utf8_payload: Option<bool>,
-//     pub response_topic: Option<ByteStr>,
-// }
-
-// #[derive(Debug, PartialEq, Clone)]
-// /// Connect packet content
-// pub struct Connect {
-//     /// mqtt protocol version
-//     pub protocol: Protocol,
-//     /// the handling of the Session state.
-//     pub clean_start: bool,
-//     /// a time interval measured in seconds.
-//     pub keep_alive: u16,
-
-//     pub session_expiry_interval_secs: Option<u32>,
-//     pub auth_method: Option<ByteStr>,
-//     pub auth_data: Option<Bytes>,
-//     pub request_problem_info: Option<bool>,
-//     pub request_response_info: Option<bool>,
-//     pub receive_max: Option<NonZeroU16>,
-//     pub topic_alias_max: u16,
-//     pub user_properties: UserProperties,
-//     pub max_packet_size: Option<NonZeroU32>,
-
-//     /// Will Message be stored on the Server and associated with the Network Connection.
-//     pub last_will: Option<LastWill>,
-//     /// identifies the Client to the Server.
-//     pub client_id: ByteStr,
-//     /// username can be used by the Server for authentication and authorization.
-//     pub username: Option<ByteStr>,
-//     /// password can be used by the Server for authentication and authorization.
-//     pub password: Option<Bytes>,
-// }
 
 #[derive(Debug, PartialEq, Clone)]
 /// Connect packet content
@@ -123,6 +75,18 @@ pub struct LastWill {
     pub response_topic: Option<ByteStr>,
 }
 
+impl LastWill {
+    fn properties_len(&self) -> usize {
+        encoded_property_size(&self.will_delay_interval_sec)
+            + encoded_property_size(&self.correlation_data)
+            + encoded_property_size(&self.message_expiry_interval)
+            + encoded_property_size(&self.content_type)
+            + encoded_property_size(&self.is_utf8_payload)
+            + encoded_property_size(&self.response_topic)
+            + self.user_properties.encoded_size()
+    }
+}
+
 impl Connect {
     fn properties_len(&self) -> usize {
         let mut prop_len = encoded_property_size(&self.session_expiry_interval_secs)
@@ -138,21 +102,7 @@ impl Connect {
         }
         prop_len
     }
-}
 
-impl LastWill {
-    fn properties_len(&self) -> usize {
-        encoded_property_size(&self.will_delay_interval_sec)
-            + encoded_property_size(&self.correlation_data)
-            + encoded_property_size(&self.message_expiry_interval)
-            + encoded_property_size(&self.content_type)
-            + encoded_property_size(&self.is_utf8_payload)
-            + encoded_property_size(&self.response_topic)
-            + self.user_properties.encoded_size()
-    }
-}
-
-impl Connect {
     pub(crate) fn parse(src: &mut Bytes) -> Result<Self, ParseError> {
         ensure!(src.remaining() >= 10, ParseError::InvalidLength);
         let len = src.get_u16();
@@ -168,7 +118,8 @@ impl Connect {
             ParseError::UnsupportedProtocolLevel
         );
 
-        let flags = ConnectFlags::from_bits(src.get_u8()).ok_or_else(|| ParseError::ConnectReservedFlagSet)?;
+        let flags = ConnectFlags::from_bits(src.get_u8())
+            .ok_or_else(|| ParseError::ConnectReservedFlagSet)?;
 
         let keep_alive = src.get_u16();
 
@@ -303,7 +254,7 @@ impl EncodeLtd for Connect {
             + self.password.as_ref().map_or(0, |v| v.encoded_size())
     }
 
-    fn encode(&self, buf: &mut BytesMut, _size: u32) -> Result<(), ParseError> {
+    fn encode(&self, buf: &mut BytesMut, _size: u32) -> Result<(), EncodeError> {
         Bytes::from(self.protocol.name().as_bytes()).encode(buf)?;
 
         let mut flags = ConnectFlags::empty();

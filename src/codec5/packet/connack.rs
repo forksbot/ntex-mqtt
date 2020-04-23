@@ -1,13 +1,6 @@
 use crate::codec5::{
-    encode::{
-        encode_opt_props, encode_property, encoded_property_size, encoded_size_opt_props,
-        reduce_limit, var_int_len, var_int_len_from_size, write_variable_length, Encode,
-        EncodeLtd,
-    },
-    parse::{take_properties, Parse, Property},
-    property_type as pt,
-    proto::QoS,
-    ByteStr, ParseError, UserProperties, UserProperty,
+    encode::*, parse::*, property_type as pt, proto::QoS, ByteStr, EncodeError, ParseError, UserProperties,
+    UserProperty,
 };
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use std::{convert::TryInto, num::NonZeroU16};
@@ -119,7 +112,8 @@ impl ConnectAckReasonCode {
 impl ConnectAck {
     pub(crate) fn parse(src: &mut Bytes) -> Result<Self, ParseError> {
         ensure!(src.remaining() >= 2, ParseError::InvalidLength);
-        let flags = ConnectAckFlags::from_bits(src.get_u8()).ok_or_else(|| ParseError::ConnAckReservedFlagSet)?;
+        let flags = ConnectAckFlags::from_bits(src.get_u8())
+            .ok_or_else(|| ParseError::ConnAckReservedFlagSet)?;
 
         let reason_code = src.get_u8().try_into()?;
 
@@ -225,7 +219,7 @@ impl EncodeLtd for ConnectAck {
         HEADER_LEN + var_int_len(prop_len) as usize + prop_len
     }
 
-    fn encode(&self, buf: &mut BytesMut, size: u32) -> Result<(), ParseError> {
+    fn encode(&self, buf: &mut BytesMut, size: u32) -> Result<(), EncodeError> {
         // todo: move upstream: write_variable_length(size, buf);
         buf.put_slice(&[
             if self.session_present { 0x01 } else { 0x00 },

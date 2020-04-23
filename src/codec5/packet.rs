@@ -1,143 +1,23 @@
 use crate::codec5::{
-    encode::{
-        encode_opt_props, encoded_size_opt_props, var_int_len, var_int_len_from_size,
-        write_variable_length, EncodeLtd,
-    },
-    parse::{take_properties, Parse, Property},
-    property_type as pt, ByteStr, ParseError, UserProperties,
+    encode::*, parse::*, property_type as pt, ByteStr, EncodeError, ParseError, UserProperties,
 };
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
+mod auth;
 mod connack;
 mod connect;
+mod disconnect;
 mod pubacks;
 mod publish;
 mod subscribe;
 
+pub use auth::*;
 pub use connack::*;
 pub use connect::*;
+pub use disconnect::*;
 pub use pubacks::*;
 pub use publish::*;
 pub use subscribe::*;
-
-/// *ACK message properties
-#[derive(Debug, PartialEq, Clone)]
-pub struct AckProperties {
-    pub reason_string: Option<ByteStr>,
-    pub user_properties: UserProperties,
-}
-
-impl Default for AckProperties {
-    fn default() -> Self {
-        AckProperties {
-            reason_string: None,
-            user_properties: UserProperties::default(),
-        }
-    }
-}
-
-impl AckProperties {
-    pub(crate) fn parse(src: &mut Bytes) -> Result<AckProperties, ParseError> {
-        let prop_src = &mut take_properties(src)?;
-        let mut reason_string = None;
-        let mut user_props = Vec::new();
-        while prop_src.has_remaining() {
-            let prop_id = prop_src.get_u8();
-            match prop_id {
-                pt::REASON_STRING => reason_string.read_value(prop_src)?,
-                pt::USER => user_props.push(<(ByteStr, ByteStr)>::parse(prop_src)?),
-                _ => return Err(ParseError::MalformedPacket),
-            }
-        }
-
-        Ok(AckProperties {
-            reason_string,
-            user_properties: user_props,
-        })
-    }
-}
-
-impl EncodeLtd for AckProperties {
-    fn encoded_size(&self, limit: u32) -> usize {
-        if limit < 4 {
-            // todo: not really needed in practice
-            return 1; // 1 byte to encode property length = 0
-        }
-
-        let len = encoded_size_opt_props(&self.user_properties, &self.reason_string, limit - 4);
-        var_int_len(len) as usize + len
-    }
-
-    fn encode(&self, buf: &mut BytesMut, size: u32) -> Result<(), ParseError> {
-        debug_assert!(size > 0); // formalize in signature?
-
-        if size == 1 {
-            // empty properties
-            buf.put_u8(0);
-            return Ok(());
-        }
-
-        let size = var_int_len_from_size(size);
-        write_variable_length(size, buf);
-        encode_opt_props(&self.user_properties, &self.reason_string, buf, size)
-    }
-}
-
-/// DISCONNECT message
-#[derive(Debug, PartialEq, Clone)]
-pub struct Disconnect {
-    pub reason_code: DisconnectReasonCode,
-    pub session_expiry_interval_secs: Option<u32>,
-    pub server_reference: Option<ByteStr>,
-    pub reason_string: Option<ByteStr>,
-    pub user_properties: UserProperties,
-}
-
-impl Default for Disconnect {
-    fn default() -> Self {
-        Self {
-            reason_code: DisconnectReasonCode::NormalDisconnection,
-            session_expiry_interval_secs: None,
-            server_reference: None,
-            reason_string: None,
-            user_properties: Vec::new(),
-        }
-    }
-}
-
-/// AUTH message
-#[derive(Debug, PartialEq, Clone)]
-pub struct Auth {
-    pub reason_code: AuthReasonCode,
-    pub auth_method: Option<ByteStr>,
-    pub auth_data: Option<Bytes>,
-    pub reason_string: Option<ByteStr>,
-    pub user_properties: UserProperties,
-}
-
-impl Default for Auth {
-    fn default() -> Self {
-        Self {
-            reason_code: AuthReasonCode::Success,
-            auth_method: None,
-            auth_data: None,
-            reason_string: None,
-            user_properties: Vec::new(),
-        }
-    }
-}
-
-#[derive(Debug, PartialEq, Clone)]
-pub enum WillProperty {
-    Utf8Payload(bool),
-    MessageExpiryInterval(u32),
-    ContentType(ByteStr),
-    ResponseTopic(ByteStr),
-    CorrelationData(Bytes),
-    SubscriptionIdentifier(u32),
-    WillDelayInterval(u32),
-    User(ByteStr, ByteStr),
-}
 
 #[derive(Debug, PartialEq, Clone)]
 /// MQTT Control Packets
@@ -223,47 +103,58 @@ pub(crate) mod property_type {
     pub const SHARED_SUB_AVAIL: u8 = 0x2A;
 }
 
-prim_enum! {
-    /// DISCONNECT reason codes
-    pub enum DisconnectReasonCode {
-        NormalDisconnection = 0,
-        DisconnectWithWillMessage = 4,
-        UnspecifiedError = 128,
-        MalformedPacket = 129,
-        ProtocolError = 130,
-        ImplementationSpecificError = 131,
-        NotAuthorized = 135,
-        ServerBusy = 137,
-        ServerShuttingDown = 139,
-        BadAuthenticationMethod = 140,
-        KeepAliveTimeout = 141,
-        SessionTakenOver = 142,
-        TopicFilterInvalid = 143,
-        TopicNameInvalid = 144,
-        ReceiveMaximumExceeded = 147,
-        TopicAliasInvalid = 148,
-        PacketTooLarge = 149,
-        MessageRateTooHigh = 150,
-        QuotaExceeded = 151,
-        AdministrativeAction = 152,
-        PayloadFormatInvalid = 153,
-        RetainNotSupported = 154,
-        QosNotSupported = 155,
-        UseAnotherServer = 156,
-        ServerMoved = 157,
-        SharedSubsriptionNotSupported = 158,
-        ConnectionRateExceeded = 159,
-        MaximumConnectTime = 160,
-        SubscriptionIdentifiersNotSupported = 161,
-        WildcardSubscriptionsNotSupported = 162
-    }
-}
+mod ack_props {
+    use super::*;
 
-prim_enum! {
-    /// AUTH reason codes
-    pub enum AuthReasonCode {
-        Success = 0,
-        ContinueAuth = 24,
-        ReAuth = 25
+    pub(crate) fn encoded_size(
+        properties: &UserProperties,
+        reason_string: &Option<ByteStr>,
+        limit: u32,
+    ) -> usize {
+        if limit < 4 {
+            // todo: not really needed in practice
+            return 1; // 1 byte to encode property length = 0
+        }
+
+        let len = encoded_size_opt_props(properties, reason_string, limit - 4);
+        var_int_len(len) as usize + len
+    }
+
+    pub(crate) fn encode(
+        properties: &UserProperties,
+        reason_string: &Option<ByteStr>,
+        buf: &mut BytesMut,
+        size: u32,
+    ) -> Result<(), EncodeError> {
+        debug_assert!(size > 0); // formalize in signature?
+
+        if size == 1 {
+            // empty properties
+            buf.put_u8(0);
+            return Ok(());
+        }
+
+        let size = var_int_len_from_size(size);
+        write_variable_length(size, buf);
+        encode_opt_props(properties, reason_string, buf, size)
+    }
+
+    /// Parses ACK properties (User and Reason String properties) from `src`
+    pub(crate) fn parse(
+        src: &mut Bytes,
+    ) -> Result<(UserProperties, Option<ByteStr>), ParseError> {
+        let prop_src = &mut take_properties(src)?;
+        let mut reason_string = None;
+        let mut user_props = Vec::new();
+        while prop_src.has_remaining() {
+            let prop_id = prop_src.get_u8();
+            match prop_id {
+                pt::REASON_STRING => reason_string.read_value(prop_src)?,
+                pt::USER => user_props.push(<(ByteStr, ByteStr)>::parse(prop_src)?),
+                _ => return Err(ParseError::MalformedPacket),
+            }
+        }
+
+        Ok((user_props, reason_string))
     }
 }

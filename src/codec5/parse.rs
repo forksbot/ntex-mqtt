@@ -1,7 +1,4 @@
-use super::{
-    codec::FixedHeader, error::ParseError, packet::property_type as pt, packet::*, proto::*,
-    ByteStr, UserProperty,
-};
+use super::{codec::FixedHeader, error::ParseError, packet::*, ByteStr, UserProperty};
 use bytes::buf::ext::{BufExt, Take as BufTake};
 use bytes::{buf::ext::Take, Buf, Bytes};
 use bytestring::ByteString;
@@ -146,8 +143,8 @@ pub(crate) fn read_packet(mut src: Bytes, header: FixedHeader) -> Result<Packet,
         packet_type::UNSUBACK => Ok(Packet::UnsubscribeAck(UnsubscribeAck::parse(&mut src)?)),
         packet_type::CONNECT => Ok(Packet::Connect(Connect::parse(&mut src)?)),
         packet_type::CONNACK => Ok(Packet::ConnectAck(ConnectAck::parse(&mut src)?)),
-        packet_type::DISCONNECT => decode_disconnect_packet(&mut src),
-        packet_type::AUTH => decode_auth_packet(&mut src),
+        packet_type::DISCONNECT => Ok(Packet::Disconnect(Disconnect::parse(&mut src)?)),
+        packet_type::AUTH => Ok(Packet::Auth(Auth::parse(&mut src)?)),
         packet_type::PUBREC => Ok(Packet::PublishReceived(PublishAck::parse(&mut src)?)),
         packet_type::PUBREL => Ok(Packet::PublishRelease(PublishAck2::parse(&mut src)?)),
         packet_type::PUBCOMP => Ok(Packet::PublishComplete(PublishAck2::parse(&mut src)?)),
@@ -181,87 +178,6 @@ pub fn decode_variable_length_cursor<B: Buf>(src: &mut B) -> Result<u32, ParseEr
     }
 }
 
-fn decode_disconnect_packet(src: &mut Bytes) -> Result<Packet, ParseError> {
-    if src.has_remaining() {
-        let reason_code = src.get_u8().try_into()?;
-
-        let mut session_expiry_interval_secs = None;
-        let mut server_reference = None;
-        let mut reason_string = None;
-        let mut user_properties = Vec::new();
-
-        let prop_src = &mut take_properties(src)?;
-        while prop_src.has_remaining() {
-            match prop_src.get_u8() {
-                pt::SESS_EXPIRY_INT => session_expiry_interval_secs.read_value(prop_src)?,
-                pt::REASON_STRING => reason_string.read_value(prop_src)?,
-                pt::USER => user_properties.push(UserProperty::parse(prop_src)?),
-                pt::SERVER_REF => server_reference.read_value(prop_src)?,
-                _ => return Err(ParseError::MalformedPacket),
-            }
-        }
-        ensure!(!src.has_remaining(), ParseError::InvalidLength);
-
-        Ok(Packet::Disconnect(Disconnect {
-            reason_code,
-            session_expiry_interval_secs,
-            server_reference,
-            reason_string,
-            user_properties,
-        }))
-    } else {
-        Ok(Packet::Disconnect(Disconnect {
-            reason_code: DisconnectReasonCode::NormalDisconnection,
-            session_expiry_interval_secs: None,
-            server_reference: None,
-            reason_string: None,
-            user_properties: Vec::new(),
-        }))
-    }
-}
-
-fn decode_auth_packet(src: &mut Bytes) -> Result<Packet, ParseError> {
-    if src.has_remaining() {
-        ensure!(src.remaining() > 1, ParseError::InvalidLength);
-        let reason_code = src.get_u8().try_into()?;
-
-        let mut auth_method = None;
-        let mut auth_data = None;
-        let mut reason_string = None;
-        let mut user_properties = Vec::new();
-
-        if reason_code != AuthReasonCode::Success || src.has_remaining() {
-            let prop_src = &mut take_properties(src)?;
-            while prop_src.has_remaining() {
-                match prop_src.get_u8() {
-                    pt::AUTH_METHOD => auth_method.read_value(prop_src)?,
-                    pt::AUTH_DATA => auth_data.read_value(prop_src)?,
-                    pt::REASON_STRING => reason_string.read_value(prop_src)?,
-                    pt::USER => user_properties.push(UserProperty::parse(prop_src)?),
-                    _ => return Err(ParseError::MalformedPacket),
-                }
-            }
-            ensure!(!src.has_remaining(), ParseError::InvalidLength);
-        }
-
-        Ok(Packet::Auth(Auth {
-            reason_code,
-            auth_method,
-            auth_data,
-            reason_string,
-            user_properties,
-        }))
-    } else {
-        Ok(Packet::Auth(Auth {
-            reason_code: AuthReasonCode::Success,
-            auth_method: None,
-            auth_data: None,
-            reason_string: None,
-            user_properties: Vec::new(),
-        }))
-    }
-}
-
 pub(crate) fn take_properties(src: &mut Bytes) -> Result<BufTake<&mut Bytes>, ParseError> {
     let prop_len = decode_variable_length_cursor(src)?;
     ensure!(
@@ -275,6 +191,7 @@ pub(crate) fn take_properties(src: &mut Bytes) -> Result<BufTake<&mut Bytes>, Pa
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codec5::proto::*;
     use crate::codec5::UserProperties;
     use bytestring::ByteString;
 
@@ -296,7 +213,8 @@ mod tests {
             &mut crate::codec5::codec::Codec::new(),
             res.clone(),
             &mut tmp,
-        );
+        )
+        .unwrap();
         println!("expected: {:X?}", tmp.as_ref());
         assert_eq!(read_packet(cur, hdr), Ok(res));
     }
@@ -484,7 +402,8 @@ mod tests {
             Packet::PublishAck(PublishAck {
                 packet_id: packet_id(0x4321),
                 reason_code: PublishAckReasonCode::Success,
-                properties: AckProperties::default(),
+                properties: UserProperties::default(),
+                reason_string: None,
             }),
         );
         assert_decode_packet(
@@ -492,7 +411,8 @@ mod tests {
             Packet::PublishReceived(PublishAck {
                 packet_id: packet_id(0x4321),
                 reason_code: PublishAckReasonCode::Success,
-                properties: AckProperties::default(),
+                properties: UserProperties::default(),
+                reason_string: None,
             }),
         );
         assert_decode_packet(
@@ -500,7 +420,8 @@ mod tests {
             Packet::PublishRelease(PublishAck2 {
                 packet_id: packet_id(0x4321),
                 reason_code: PublishAck2ReasonCode::Success,
-                properties: AckProperties::default(),
+                properties: UserProperties::default(),
+                reason_string: None,
             }),
         );
         assert_decode_packet(
@@ -508,7 +429,8 @@ mod tests {
             Packet::PublishComplete(PublishAck2 {
                 packet_id: packet_id(0x4321),
                 reason_code: PublishAck2ReasonCode::Success,
-                properties: AckProperties::default(),
+                properties: UserProperties::default(),
+                reason_string: None,
             }),
         );
     }
@@ -542,9 +464,12 @@ mod tests {
         });
 
         assert_eq!(
-            Packet::Subscribe(Subscribe::parse(&mut Bytes::from_static(
-                b"\x12\x34\x00\x00\x04test\x01\x00\x06filter\x02"
-            )).unwrap()),
+            Packet::Subscribe(
+                Subscribe::parse(&mut Bytes::from_static(
+                    b"\x12\x34\x00\x00\x04test\x01\x00\x06filter\x02"
+                ))
+                .unwrap()
+            ),
             p.clone()
         );
         assert_decode_packet(b"\x82\x13\x12\x34\x00\x00\x04test\x01\x00\x06filter\x02", p);
@@ -556,11 +481,14 @@ mod tests {
                 SubscribeAckReasonCode::UnspecifiedError,
                 SubscribeAckReasonCode::GrantedQos2,
             ],
-            properties: AckProperties::default(),
+            properties: UserProperties::default(),
+            reason_string: None,
         });
 
         assert_eq!(
-            Packet::Subscribe(Subscribe::parse(&mut Bytes::from_static(b"\x12\x34\x00\x01\x80\x02")).unwrap()),
+            Packet::Subscribe(
+                Subscribe::parse(&mut Bytes::from_static(b"\x12\x34\x00\x01\x80\x02")).unwrap()
+            ),
             p.clone()
         );
         assert_decode_packet(b"\x90\x05\x12\x34\x00\x01\x80\x02", p);
@@ -575,9 +503,12 @@ mod tests {
         });
 
         assert_eq!(
-            Packet::Unsubscribe(Unsubscribe::parse(&mut Bytes::from_static(
-                b"\x12\x34\x00\x00\x04test\x00\x06filter"
-            )).unwrap()),
+            Packet::Unsubscribe(
+                Unsubscribe::parse(&mut Bytes::from_static(
+                    b"\x12\x34\x00\x00\x04test\x00\x06filter"
+                ))
+                .unwrap()
+            ),
             p.clone()
         );
         assert_decode_packet(b"\xa2\x11\x12\x34\x00\x00\x04test\x00\x06filter", p);
@@ -586,7 +517,8 @@ mod tests {
             b"\xb0\x03\x43\x21\x00",
             Packet::UnsubscribeAck(UnsubscribeAck {
                 packet_id: packet_id(0x4321),
-                properties: AckProperties::default(),
+                properties: UserProperties::default(),
+                reason_string: None,
                 status: vec![],
             }),
         );

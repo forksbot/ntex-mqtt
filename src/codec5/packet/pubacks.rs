@@ -1,14 +1,9 @@
-use super::AckProperties;
-use crate::codec5::{
-    encode::{
-        encode_opt_props, encoded_size_opt_props, var_int_len, var_int_len_from_size,
-        write_variable_length, Encode, EncodeLtd,
-    },
-    parse::Parse,
-    ParseError,
-};
+use super::ack_props;
+use crate::codec5::{encode::*, parse::*, ByteStr, EncodeError, ParseError, UserProperties};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use std::{convert::TryInto, num::NonZeroU16};
+
+const HEADER_LEN: u32 = 2 + 1; // packet id + reason code
 
 /// PUBACK/PUBREC message content
 #[derive(Debug, PartialEq, Clone)]
@@ -16,7 +11,8 @@ pub struct PublishAck {
     /// Packet Identifier
     pub packet_id: NonZeroU16,
     pub reason_code: PublishAckReasonCode,
-    pub properties: AckProperties,
+    pub properties: UserProperties,
+    pub reason_string: Option<ByteStr>,
 }
 
 /// PUBREL/PUBCOMP message content
@@ -25,7 +21,8 @@ pub struct PublishAck2 {
     /// Packet Identifier
     pub packet_id: NonZeroU16,
     pub reason_code: PublishAck2ReasonCode,
-    pub properties: AckProperties,
+    pub properties: UserProperties,
+    pub reason_string: Option<ByteStr>,
 }
 
 prim_enum! {
@@ -55,19 +52,24 @@ prim_enum! {
 impl PublishAck {
     pub(crate) fn parse(src: &mut Bytes) -> Result<Self, ParseError> {
         let packet_id = NonZeroU16::parse(src)?;
-        let (reason_code, properties) = if src.has_remaining() {
+        let (reason_code, properties, reason_string) = if src.has_remaining() {
             let reason_code = src.get_u8().try_into()?;
-            let properties = AckProperties::parse(src)?;
+            let (properties, reason_string) = ack_props::parse(src)?;
             ensure!(!src.has_remaining(), ParseError::InvalidLength); // no bytes should be left
-            (reason_code, properties)
+            (reason_code, properties, reason_string)
         } else {
-            (PublishAckReasonCode::Success, AckProperties::default())
+            (
+                PublishAckReasonCode::Success,
+                UserProperties::default(),
+                None,
+            )
         };
 
         Ok(Self {
             packet_id,
             reason_code,
             properties,
+            reason_string,
         })
     }
 }
@@ -75,35 +77,48 @@ impl PublishAck {
 impl PublishAck2 {
     pub(crate) fn parse(src: &mut Bytes) -> Result<Self, ParseError> {
         let packet_id = NonZeroU16::parse(src)?;
-        let (reason_code, properties) = if src.has_remaining() {
+        let (reason_code, properties, reason_string) = if src.has_remaining() {
             let reason_code = src.get_u8().try_into()?;
-            let properties = AckProperties::parse(src)?;
+            let (properties, reason_string) = ack_props::parse(src)?;
             ensure!(!src.has_remaining(), ParseError::InvalidLength); // no bytes should be left
-            (reason_code, properties)
+            (reason_code, properties, reason_string)
         } else {
-            (PublishAck2ReasonCode::Success, AckProperties::default())
+            (
+                PublishAck2ReasonCode::Success,
+                UserProperties::default(),
+                None,
+            )
         };
 
         Ok(Self {
             packet_id,
             reason_code,
             properties,
+            reason_string,
         })
     }
 }
 
 impl EncodeLtd for PublishAck {
     fn encoded_size(&self, limit: u32) -> usize {
-        const HEADER_LEN: u32 = 2 + 1; // packet id + reason code
-        let prop_len = self.properties.encoded_size(limit - HEADER_LEN - 4); // limit - HEADER_LEN - len(packet_len.max())
+        let prop_len = ack_props::encoded_size(
+            &self.properties,
+            &self.reason_string,
+            limit - HEADER_LEN - 4,
+        ); // limit - HEADER_LEN - len(packet_len.max())
         HEADER_LEN as usize + prop_len
     }
 
-    fn encode(&self, buf: &mut BytesMut, size: u32) -> Result<(), ParseError> {
+    fn encode(&self, buf: &mut BytesMut, size: u32) -> Result<(), EncodeError> {
         write_variable_length(size, buf);
         self.packet_id.get().encode(buf)?;
         buf.put_u8(self.reason_code.into());
-        self.properties.encode(buf, size - 3)?;
+        ack_props::encode(
+            &self.properties,
+            &self.reason_string,
+            buf,
+            size - HEADER_LEN,
+        )?;
         Ok(())
     }
 }
@@ -111,15 +126,19 @@ impl EncodeLtd for PublishAck {
 impl EncodeLtd for PublishAck2 {
     fn encoded_size(&self, limit: u32) -> usize {
         const HEADER_LEN: u32 = 2 + 1; // fixed header + packet id + reason code
-        let prop_len = self.properties.encoded_size(limit - HEADER_LEN - 4); // limit - HEADER_LEN - packet_len.max()
+        let prop_len = ack_props::encoded_size(
+            &self.properties,
+            &self.reason_string,
+            limit - HEADER_LEN - 4,
+        ); // limit - HEADER_LEN - prop_len.max()
         HEADER_LEN as usize + prop_len
     }
 
-    fn encode(&self, buf: &mut BytesMut, size: u32) -> Result<(), ParseError> {
+    fn encode(&self, buf: &mut BytesMut, size: u32) -> Result<(), EncodeError> {
         write_variable_length(size, buf);
         self.packet_id.get().encode(buf)?;
         buf.put_u8(self.reason_code.into());
-        self.properties.encode(buf, size - 3)?;
+        ack_props::encode(&self.properties, &self.reason_string, buf, size - 3)?;
         Ok(())
     }
 }
